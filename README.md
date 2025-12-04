@@ -2,7 +2,7 @@
 
 Use this action to check your pull request to make sure it is linked to a work item using ``AB#`` before you can merge.
 
-[Click here](https://github.com/marketplace/actions/check-for-ab) to see the action in the GitHub marketplace
+[Click here](https://github.com/marketplace/actions/azure-boards-check-for-ab) to see the action in the GitHub marketplace.
 
 ## 💁‍♂️ Usage
 
@@ -18,6 +18,8 @@ Make sure the GitHub repository is properly linked to an Azure DevOps project. T
 The action will check the pull request description for ``AB#`` and a valid work item id. If it finds a valid work item id, it will pass. If it does not find a valid work item id, it will fail.
 
 If the sender is ``dependabot[bot]`` the action will ignore the check.
+
+https://github.com/danhellem/github-actions-pr-is-linked-to-work-item/assets/10525048/1a63ba2d-067b-4f79-b292-b2d1118c43ed
 
 ## 🔑 Permissions
 

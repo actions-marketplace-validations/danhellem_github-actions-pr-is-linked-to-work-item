@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
 import {Context} from '@actions/github/lib/context'
+import { GitHub } from '@actions/github/lib/utils'
 
 async function run(): Promise<void> {
   try {
@@ -14,17 +15,11 @@ async function run(): Promise<void> {
     const sender_login: string = context.payload.sender?.login ?? ''
     
     let work_item_id = ''
-    let last_comment_posted_by_action = ""    
+    let last_comment_posted: ILastCommentPosted = {code: "", id: 0 }
 
-    const octokit = github.getOctokit(github_token)        
-
-    //console.log(`Repository owner: ${repository_owner}`)
-    //console.log(`Repository name: ${repository_name}`)  
-    //console.log(`Sender login: ${sender_login}`)
-    //console.log(`Event name: ${context.eventName}`)
-    //console.log(`Pull request number: ${pull_request_number}`)   
-    //console.log(`Pull request description: ${pull_request_description}`)
-    //console.log(`Comment: ${context.payload.comment?.body}`)
+    const octokit: InstanceType<typeof GitHub> = github.getOctokit(github_token)   
+    
+    console.log(sender_login)
 
     // if the sender in the azure-boards bot or dependabot, then exit code
     // nothing needs to be done
@@ -33,109 +28,91 @@ async function run(): Promise<void> {
       return
     }
 
-    //azure-boards[bot]
-
     if (context.eventName === 'pull_request') {   
       
-      // get all comments for the pull request
-      try {
-        const response = await octokit.rest.issues.listComments({
-          owner: repository_owner,
-          repo: repository_name,
-          issue_number:  pull_request_number,
-        })
-
-        // check for comments
-        if (response.data.length > 0) {
-          const comments: IComments[] = response.data.map((comment) => {
-            return {
-              id: comment.id, 
-              created_at: new Date(comment.created_at),
-              body: comment.body
-            }
-          })  
-
-          // sort comments by date descending
-          comments.sort((a, b) => b.created_at?.getTime()! - a.created_at?.getTime()!) 
-          
-          // loop through comments and grab the most recent comment posted by this action
-          // we want to use this to check later so we don't post duplicate comments
-          for (const comment of comments) { 
-            if (comment.body?.includes('lcc-404')) { 
-              last_comment_posted_by_action = "lcc-404"
-              break
-            }
-
-            if (comment.body?.includes('lcc-416')) { 
-              last_comment_posted_by_action = "lcc-416"
-              break
-            }        
-            
-            if (comment.body?.includes('lcc-200')) {
-              last_comment_posted_by_action = "lcc-200"
-              break
-            }
-          }          
-        }
-        
-      } catch (error) {
-        console.log(error)
-      }    
+      last_comment_posted = await getLastComment(octokit, repository_owner, repository_name, pull_request_number)
+      console.log(`Last comment posted by action: ${last_comment_posted.code}`)
 
       // check if pull request description contains a AB#<work item number>
-      console.log(`Checking description for AB#{ID} ...`)
+      console.log(`Checking description for AB#{ID} ...`)     
      
-      if (ab_lookup_match) {        
+      if (ab_lookup_match) {
         
         for (const match of ab_lookup_match) {
           work_item_id = match.substring(3)
           break    
         }
 
+        // Validate work_item_id is a valid integer
+        if (!/^\d+$/.test(work_item_id)) {
+          const errorMsg = `❌ Invalid work item number: AB#${work_item_id}. Work item number must be a valid integer.`
+          console.log(errorMsg)
+          await octokit.rest.issues.createComment({
+            ...context.repo,
+            issue_number: pull_request_number,
+            body: `${errorMsg}\n\n[Click here](https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github?view=azure-devops#use-ab-mention-to-link-from-github-to-azure-boards-work-items) to learn more.\n\n<!-- code: lcc-416 -->`
+          })
+          core.setFailed(errorMsg)
+          return
+        }        
+        
         console.log(`AB#${work_item_id} found in pull request description.`)
         console.log(`Checking to see if bot created link ...`)    
         
         // check if the description contains a link to the work item
         if (pull_request_description?.includes('[AB#') && pull_request_description?.includes('/_workitems/edit/')) {
           console.log(`Success: AB#${work_item_id} link found.`)
-          console.log('Done.')
+          console.log('Done.')         
           
           // if the last comment is the check failed, now it passed and we can post a new comment
-          if (last_comment_posted_by_action !== "lcc-200") { 
+          if (last_comment_posted.code !== "lcc-200" && sender_login === "azure-boards[bot]") { 
+            
+             // if the last check failed, then the azure-boards[bot] ran and passed, we can delete the last comment
+            if (last_comment_posted.code === "lcc-416" && sender_login === "azure-boards[bot]") {
+              console.log(`Deleting last comment posted by action: ${last_comment_posted.id}`)
+              
+              await octokit.rest.issues.deleteComment({
+                owner: repository_owner,
+                repo: repository_name,
+                comment_id: last_comment_posted.id
+              })
+            }            
+            
             await octokit.rest.issues.createComment({
               ...context.repo,
               issue_number: pull_request_number,
-              body: `✅ Work item link check complete. Description contains link AB#${work_item_id} to an Azure Boards work item. <br><br>*code: lcc-200*`
+              body: `✅ Work item link check complete. Description contains link AB#${work_item_id} to an Azure Boards work item.\n\n<!-- code: lcc-200 -->`
             })
           }
 
           return
         }
-        
-        // becuase of the sequence of events, we only would to check this if the sender is the boards bot 
-        if (sender_login === "azure-boards[bot]") {
+        else {
+          // check if the description contains a link to the work item
           console.log(`Bot did not create a link from AB#${work_item_id}`)
           
-          if (last_comment_posted_by_action !== "lcc-416") {
+          if (last_comment_posted.code !== "lcc-416" && sender_login !== "azure-boards[bot]") {
             await octokit.rest.issues.createComment({
               ...context.repo,
               issue_number: pull_request_number,
-              body: `❌ Work item link check failed. Description contains AB#${work_item_id} but the Bot could not link it to an Azure Boards work item. [Click here](https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github?view=azure-devops#use-ab-mention-to-link-from-github-to-azure-boards-work-items) to learn more.<br><br>*code: lcc-416*`
+              body: `❌ Work item link check failed. Description contains AB#${work_item_id} but the Bot could not link it to an Azure Boards work item.\n\n[Click here](https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github?view=azure-devops#use-ab-mention-to-link-from-github-to-azure-boards-work-items) to learn more.\n\n<!--code: lcc-416-->`
             }) 
-          }
+
+            core.setFailed(`Description contains AB#${work_item_id} but the Bot could not link it to an Azure Boards work item`)
+            return
+          }      
           
-          core.setFailed(`Description contains AB#${work_item_id} but the Bot could not link it to an Azure Boards work item`)
-        }    
-        
-        core.warning(`Description contains AB#${work_item_id} and waiting for the azure-boards[bot] to validate the link`)
+          core.warning(`Description contains AB#${work_item_id} and waiting for the azure-boards[bot] to validate the link`)
+        }       
+       
         return
       }   
       else {   
-          if (last_comment_posted_by_action !== "lcc-404") {
+          if (last_comment_posted.code !== "lcc-404") {
             await octokit.rest.issues.createComment({
               ...context.repo,
               issue_number: pull_request_number,
-              body: `❌ Work item link check failed. Description does not contain AB#{ID}. [Click here](https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github?view=azure-devops#use-ab-mention-to-link-from-github-to-azure-boards-work-items) to Learn more.<br><br>*code: lcc-404*`
+              body: `❌ Work item link check failed. Description does not contain AB#{ID}.\n\n[Click here](https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github?view=azure-devops#use-ab-mention-to-link-from-github-to-azure-boards-work-items) to Learn more.\n\n<!-- code: lcc-404 -->`
             }) 
           }
 
@@ -143,14 +120,78 @@ async function run(): Promise<void> {
       }    
     } 
 
-    octokit == null
   } catch (error) {
     if (error instanceof Error) core.setFailed(error.message)
   }
 }
 
+async function getLastComment(octokit: InstanceType<typeof GitHub>, repository_owner: string, repository_name: string, pull_request_number: number): Promise<ILastCommentPosted> {  
+  
+  const last_comment_posted: ILastCommentPosted = {code: "", id: 0 }
+
+  // get all comments for the pull request
+  try {
+    const response = await octokit.rest.issues.listComments({
+      owner: repository_owner,
+      repo: repository_name,
+      issue_number:  pull_request_number,
+    })
+
+    // check for comments
+    if (response.data.length > 0) {
+      const comments: IComments[] = response.data.map((comment) => {
+        return {
+          id: comment.id, 
+          created_at: new Date(comment.created_at),
+          body: comment.body
+        }
+      })  
+
+      // sort comments by date descending
+      comments.sort((a, b) => {
+        const aTime = a.created_at?.getTime() ?? 0
+        const bTime = b.created_at?.getTime() ?? 0
+        return bTime - aTime
+      }) 
+      
+      // loop through comments and grab the most recent comment posted by this action
+      // we want to use this to check later so we don't post duplicate comments
+      for (const comment of comments) {     
+
+        last_comment_posted.id = comment.id ?? 0
+        
+        if (comment.body?.includes('lcc-404')) { 
+          last_comment_posted.code = "lcc-404"
+          break            
+        }
+
+        if (comment.body?.includes('lcc-416')) { 
+          last_comment_posted.code = "lcc-416"   
+          break               
+        }        
+        
+        if (comment.body?.includes('lcc-200')) {
+          last_comment_posted.code = "lcc-200"    
+          break   
+        }
+
+      }         
+    }    
+    
+  } catch (error) {
+    console.log(error)    
+  }    
+
+  return last_comment_posted
+}
+
+interface ILastCommentPosted {
+  code: string,
+  id: number,
+}
+
 interface IComments {
-  id: Number | undefined,
+  id: number | undefined,
   created_at: Date | undefined,
   body: string | undefined,
 }
